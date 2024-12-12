@@ -1,0 +1,131 @@
+static_resources:
+  listeners:
+  - name: listener_0
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 9095
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          codec_type: AUTO
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: local_service
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/sse"
+                route:
+                  cluster: sse_stream_service
+                  timeout: 0s
+              - match:
+                  prefix: "/chat"
+                route:
+                  cluster: sse_chat_service
+                  timeout: 0s
+          http_filters:
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              inline_code: |
+                function envoy_on_request(request_handle)
+                  request_handle:logInfo("Inside on request start")
+                  local request_body = request_handle:body()
+                  if request_body then
+                    request_handle:logInfo("Request body object found")
+                    local body_length = request_body:length()
+                    if body_length > 0 then
+                      local body = request_body:getBytes(0, body_length)
+                      request_handle:logInfo("Request body content: " .. (body or "nil"))
+                      local message = body:match("message=(.*)")
+                      request_handle:logInfo("Extracted Request message: " .. (message or "nil"))
+                      if message then
+                        local json_message = string.format('{"message": "%s"}', message)
+                        request_handle:body():setBytes(json_message)
+                        request_handle:headers():replace("content-type", "application/json")
+                        request_handle:logInfo("Transformed request to JSON: " .. json_message)
+                      else
+                        request_handle:logInfo("No 'message' found in request body")
+                      end
+                    else
+                      request_handle:logInfo("Request body is empty")
+                    end
+                  else
+                    request_handle:logInfo("No request body found")
+                  end
+                  request_handle:logInfo("Inside on request end")
+                end
+
+                function envoy_on_response(response_handle)
+                  local random_number = math.random(1, 100)
+                  response_handle:logInfo(tostring(random_number) .. " Starting response body processing")
+
+                  local transform_chunk = function(chunk)
+                    local chunk_body = chunk:getBytes(0, chunk:length())
+                    response_handle:logInfo(tostring(random_number) .. " Received response chunk: " .. (chunk_body or "nil"))
+
+                    local message = chunk_body
+                    response_handle:logInfo(tostring(random_number) .. " Extracted Response message: " .. (message or "nil"))
+
+                    if message then
+                      local plain_text_message = "Tranformed message=" .. message
+                      response_handle:logInfo(tostring(random_number) .. " Transformed response to plain text: " .. plain_text_message)
+                      chunk:setBytes(plain_text_message)
+                    else
+                      response_handle:logInfo(tostring(random_number) .. " No 'message' field found in response chunk")
+                    end
+                  end
+
+                  for chunk in response_handle:bodyChunks() do
+                    transform_chunk(chunk)
+                  end
+
+                  response_handle:logInfo(tostring(random_number) .. " Completed response body processing")
+                end
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          common_http_protocol_options:
+            idle_timeout: 0s # Disable idle timeout
+            headers_with_underscores_action: ALLOW
+          stream_idle_timeout: 0s # Disable stream idle timeout
+  clusters:
+  - name: sse_stream_service
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: sse_stream_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: sse-server.apk.svc.cluster.local
+                port_value: 5000
+
+  - name: sse_chat_service
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: sse_chat_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: sse-chat-server.apk.svc.cluster.local
+                port_value: 5000
+
+admin:
+  access_log_path: /tmp/admin_access.log
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
